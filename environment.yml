@@ -1,0 +1,4 @@
+name: cir
+channels:
+  - defaults
+prefix: /home/izaazm/anaconda3/envs/cir
