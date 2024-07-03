@@ -1,17 +1,20 @@
-from PIL import Image
 import requests
+from PIL import Image
+
 import torch
-from transformers import AutoProcessor, CLIPModel
+from transformers import AutoProcessor, AutoModel
 
 if __name__ == "__main__":
     print("Hello, World!")    
+
     if torch.cuda.is_available():
         print("Cuda is available")
         device = torch.device("cuda")
     else:
         print("Cuda is not available")
         device = torch.device("cpu")
-    model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32").to(device)
+
+    model = AutoModel.from_pretrained("openai/clip-vit-base-patch32").to(device)
     processor = AutoProcessor.from_pretrained("openai/clip-vit-base-patch32")
 
     url = "http://images.cocodataset.org/val2017/000000039769.jpg"
