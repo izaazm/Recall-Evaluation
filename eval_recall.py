@@ -34,7 +34,7 @@ def get_images(image_names):
     return res
 
 @torch.no_grad()
-def get_retrieved_image_score(blip_processor, blip_model, device, src_text, src_image, retrieved_images):
+def get_retrieved_image_score(blip_processor, blip_model, device, src_text, src_image, retrieved_images, print_images=False):
     src_inputs = blip_processor(images=get_images([src_image]), text=src_text, padding=True, return_tensors="pt").to(device)
     src_features = blip_model.get_multimodal_features(**src_inputs).detach().cpu()
 
@@ -42,6 +42,11 @@ def get_retrieved_image_score(blip_processor, blip_model, device, src_text, src_
     tgt_features = blip_model.get_image_features(**tgt_inputs).detach().cpu()
 
     score = (torch.sum(F.cosine_similarity(src_features, tgt_features)) / len(retrieved_images)) * 100
+    if print_images:
+        print(f"Source Image : {src_image}")
+        print(f"Source Text : {src_text}")
+        print(f"Retrieved Images : {retrieved_images}")
+        print(f"Score : {score}")
     return score
 
 
@@ -75,7 +80,7 @@ def fashioniq_retrieval(dress_type, clip_model, combining_function, preprocess, 
 
 
 def get_metric(relative_val_dataset, clip_model, index_features, index_names, combining_function, blip_backbone, device):
-    predicted_features, target_names, captions = get_preds(relative_val_dataset, clip_model, index_features, index_names, combining_function)
+    predicted_features, target_names, reference_names, captions = get_preds(relative_val_dataset, clip_model, index_features, index_names, combining_function)
     print(f"Predicted features shape : {predicted_features.shape}") # val_entry x feature_shape
     print(f"Target names shape : {len(target_names)}") # val_entry x feature_shape
     len_data = len(target_names)
@@ -106,15 +111,23 @@ def get_metric(relative_val_dataset, clip_model, index_features, index_names, co
     scoreat50 = 0
     scoreat10_modified = 0
     scoreat50_modified = 0
+    print_images = False
+    done = False
     for i in tqdm(range(sorted_index_names.shape[0])):
-        scoreat10 += get_retrieved_image_score(blip_processor, blip_model, device, captions[i], target_names[i], sorted_index_names[i][:10])
-        scoreat50 += get_retrieved_image_score(blip_processor, blip_model, device, captions[i], target_names[i], sorted_index_names[i][:50])
+        if target_names[i] in sorted_index_names[i][:10] and not done:
+            print_images = True
+            done = True
 
+        scoreat10 += get_retrieved_image_score(blip_processor, blip_model, device, captions[i], reference_names[i], sorted_index_names[i][:10], print_images=print_images)
+        scoreat50 += get_retrieved_image_score(blip_processor, blip_model, device, captions[i], reference_names[i], sorted_index_names[i][:50])
+
+        # Modify the list to replace the target image with the 10th and 50th retrieved images -> recall = 0
         modified_list_10 = [x if x != target_names[i] else sorted_index_names[i][10] for x in sorted_index_names[i][:10]]
         modified_list_50 = [x if x != target_names[i] else sorted_index_names[i][50] for x in sorted_index_names[i][:50]]
 
-        scoreat10_modified += get_retrieved_image_score(blip_processor, blip_model, device, captions[i], target_names[i], modified_list_10)
-        scoreat50_modified += get_retrieved_image_score(blip_processor, blip_model, device, captions[i], target_names[i], modified_list_50)
+        scoreat10_modified += get_retrieved_image_score(blip_processor, blip_model, device, captions[i], reference_names[i], modified_list_10, print_images=print_images)
+        scoreat50_modified += get_retrieved_image_score(blip_processor, blip_model, device, captions[i], reference_names[i], modified_list_50)
+        print_images = False
 
     # Compute the ground-truth labels wrt the predictions
     labels = torch.tensor(sorted_index_names == np.repeat(np.array(target_names), len(index_names)).reshape(len(target_names), -1))
@@ -139,6 +152,7 @@ def get_preds(relative_val_dataset, clip_model, index_features, index_names, com
     predicted_features = torch.empty((0, clip_model.visual.output_dim)).to(device, non_blocking=True)
     target_names = []
     captions_test = []
+    all_reference_names = []
 
     for reference_names, batch_target_names, captions in tqdm(relative_val_loader):
 
@@ -161,10 +175,11 @@ def get_preds(relative_val_dataset, clip_model, index_features, index_names, com
             batch_predicted_features = combining_function(reference_image_features, text_features)
 
         predicted_features = torch.vstack((predicted_features, F.normalize(batch_predicted_features, dim=-1)))
+        all_reference_names.extend(reference_names)
         target_names.extend(batch_target_names)
         captions_test.extend(input_captions)
 
-    return predicted_features, target_names, captions_test
+    return predicted_features, target_names, all_reference_names, captions_test
 
 
 if __name__ == "__main__":
