@@ -104,9 +104,17 @@ def get_metric(relative_val_dataset, clip_model, index_features, index_names, co
 
     scoreat10 = 0
     scoreat50 = 0
+    scoreat10_modified = 0
+    scoreat50_modified = 0
     for i in tqdm(range(sorted_index_names.shape[0])):
         scoreat10 += get_retrieved_image_score(blip_processor, blip_model, device, captions[i], target_names[i], sorted_index_names[i][:10])
         scoreat50 += get_retrieved_image_score(blip_processor, blip_model, device, captions[i], target_names[i], sorted_index_names[i][:50])
+
+        modified_list_10 = [x if x != target_names[i] else sorted_index_names[i][10] for x in sorted_index_names[i][:10]]
+        modified_list_50 = [x if x != target_names[i] else sorted_index_names[i][50] for x in sorted_index_names[i][:50]]
+
+        scoreat10_modified += get_retrieved_image_score(blip_processor, blip_model, device, captions[i], target_names[i], modified_list_10)
+        scoreat50_modified += get_retrieved_image_score(blip_processor, blip_model, device, captions[i], target_names[i], modified_list_50)
 
     # Compute the ground-truth labels wrt the predictions
     labels = torch.tensor(sorted_index_names == np.repeat(np.array(target_names), len(index_names)).reshape(len(target_names), -1))
@@ -117,8 +125,10 @@ def get_metric(relative_val_dataset, clip_model, index_features, index_names, co
     recall_at50 = (torch.sum(labels[:, :50]) / len(labels)).item() * 100
     blip_scores_at10 = scoreat10 / len(labels)
     blip_scores_at50 = scoreat50 / len(labels)
+    blip_scores_at10_modified = scoreat10_modified / len(labels)
+    blip_scores_at50_modified = scoreat50_modified / len(labels)
 
-    return recall_at10, recall_at50, blip_scores_at10, blip_scores_at50
+    return recall_at10, recall_at50, blip_scores_at10, blip_scores_at50, blip_scores_at10_modified, blip_scores_at50_modified
 
 @torch.no_grad()
 def get_preds(relative_val_dataset, clip_model, index_features, index_names, combining_function):
@@ -167,6 +177,10 @@ if __name__ == "__main__":
     clip_model, preprocess, combining_function = get_clip4cir_model(clip_path, model_name, combiner_path, device)
 
     ## Test on FashionIQ dataset's
-    recallat10, recallat50 = fashioniq_retrieval('shirt', clip_model, combining_function, preprocess, blip_backbone, device)
-    print(f"Recall @ 10 : {recallat10}")
-    print(f"Recall @ 50 : {recallat50}")
+    recall_at10, recall_at50, blip_scores_at10, blip_scores_at50, blip_scores_at10_modified, blip_scores_at50_modified = fashioniq_retrieval('shirt', clip_model, combining_function, preprocess, blip_backbone, device)
+    print(f"Recall @ 10 : {recall_at10}")
+    print(f"Recall @ 50 : {recall_at50}")
+    print(f"BLIP Scores @ 10 : {blip_scores_at10}")
+    print(f"BLIP Scores @ 50 : {blip_scores_at50}")
+    print(f"BLIP Scores Modified @ 10 : {blip_scores_at10_modified}")
+    print(f"BLIP Scores Modified @ 50 : {blip_scores_at50_modified}")

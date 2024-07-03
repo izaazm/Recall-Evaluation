@@ -7,7 +7,7 @@ import numpy as np
 
 import torch
 import torch.nn.functional as F
-from transformers import AutoProcessor, AutoModel
+from transformers import AutoProcessor, BlipTextModel, BlipVisionModel, AutoConfig
 
 def set_seed(seed: int = 2) -> None:
     np.random.seed(seed)
@@ -28,9 +28,10 @@ if __name__ == "__main__":
         print("Cuda is not available")
         device = torch.device("cpu")
 
-    model = AutoModel.from_pretrained("./blip/").to(device).eval()
-    image_processor = AutoProcessor.from_pretrained("Salesforce/blip-itm-base-coco")
-    text_processor = AutoProcessor.from_pretrained("Salesforce/blip-itm-base-coco")
+    blipconfig = AutoConfig.from_pretrained("Salesforce/blip-itm-base-coco")
+    blipvisionmodel = BlipVisionModel.from_config(blipconfig.vision_config)
+    bliptextmodel = BlipTextModel.from_config(blipconfig.text_config, add_pooling_layer=False)
+    image_processor = AutoProcessor.from_config(blipconfig)
 
     url = "http://images.cocodataset.org/val2017/000000039769.jpg"
     image = Image.open(requests.get(url, stream=True).raw)
