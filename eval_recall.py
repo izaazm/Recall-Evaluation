@@ -2,17 +2,19 @@ import os
 import gc
 import sys
 from operator import itemgetter
+import argparse
 
 import numpy as np
 from PIL import Image
 from tqdm import tqdm
+from scipy.stats import spearmanr, pearsonr
 
 import clip
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
-from transformers import AutoProcessor, AutoTokenizer, BlipModel
+from transformers import AutoProcessor, AutoTokenizer, BlipForImageTextRetrieval
 
 from CLIP4Cir.src.data_utils import targetpad_transform, FashionIQDataset
 from CLIP4Cir.src.combiner import Combiner
@@ -33,25 +35,8 @@ def get_images(image_names):
         res.append(Image.open(image_path))
     return res
 
-@torch.no_grad()
-def get_retrieved_image_score(blip_processor, blip_model, device, src_text, src_image, retrieved_images, print_images=False):
-    src_inputs = blip_processor(images=get_images([src_image]), text=src_text, padding=True, return_tensors="pt").to(device)
-    src_features = blip_model.get_multimodal_features(**src_inputs).detach().cpu()
-
-    tgt_inputs = blip_processor(images=get_images(retrieved_images), return_tensors="pt").to(device)
-    tgt_features = blip_model.get_image_features(**tgt_inputs).detach().cpu()
-
-    score = (torch.sum(F.cosine_similarity(src_features, tgt_features)) / len(retrieved_images)) * 100
-    if print_images:
-        print(f"Source Image : {src_image}")
-        print(f"Source Text : {src_text}")
-        print(f"Retrieved Images : {retrieved_images}")
-        print(f"Score : {score}")
-    return score
-
-
 def get_clip4cir_model(clip_path, model_name, combiner_path, device):
-    print("Getting Clip Model")
+    print("Getting Clip4cir Model")
 
     clip_model, _ = clip.load(model_name, jit=False)
     input_dim = clip_model.visual.input_resolution
@@ -70,78 +55,88 @@ def get_clip4cir_model(clip_path, model_name, combiner_path, device):
     print("Finished Loading Model")
     return clip_model, preprocess, combining_function
 
+def get_blip_model(backbone, device):
+    print("Getting BLIP model")
+    blip_processor = AutoProcessor.from_pretrained(backbone)
+    blip_model = BlipForImageTextRetrieval.from_pretrained(backbone).to(device).eval()
+    print("Finished Loading model")
+    return blip_processor, blip_model
 
-def fashioniq_retrieval(dress_type, clip_model, combining_function, preprocess, blip_backbone, device):
-    classic_val_dataset = FashionIQDataset('val', [dress_type], 'classic', preprocess)
-    relative_val_dataset = FashionIQDataset('val', [dress_type], 'relative', preprocess)
-    index_features, index_names = extract_index_features(classic_val_dataset, clip_model)
+@torch.no_grad()
+def get_blip_scores(model, processor, src_text, src_image, tgt_images, device):
+    # processing
+    src_text_inputs = processor(text=src_text, return_tensors="pt").to(device)
+    if src_image is not None:
+        src_image_inputs = processor(images=src_image, return_tensors="pt").to(device)
+    tgt_image_inputs = processor(images=tgt_images, return_tensors="pt").to(device)
 
-    return get_metric(relative_val_dataset, clip_model, index_features, index_names, combining_function, blip_backbone, device)
+    # image embedding
+    tgt_image_outputs = model.vision_model(
+        pixel_values=tgt_image_inputs.pixel_values,
+        interpolate_pos_encoding=False
+    )
+    tgt_image_embeds = tgt_image_outputs[0]
+
+    # multimodal embedding
+    if src_image is not None:
+        src_image_outputs = model.vision_model(
+            pixel_values=src_image_inputs.pixel_values,
+            interpolate_pos_encoding=False
+        )
+        src_image_embeds = src_image_outputs[0]
+        src_image_atts = torch.ones(src_image_embeds.size()[:-1], dtype=torch.long)
+
+        multimodal_embeds = model.text_encoder(
+            input_ids=src_text_inputs.input_ids,
+            attention_mask=src_text_inputs.attention_mask,
+            encoder_hidden_states=src_image_embeds,
+            encoder_attention_mask=src_image_atts,
+        )
+        multimodal_embeds = multimodal_embeds[0]
+    else:
+        multimodal_embeds = model.text_encoder(
+            input_ids=src_text_inputs.input_ids,
+            attention_mask=src_text_inputs.attention_mask,
+        )
+        multimodal_embeds = multimodal_embeds[0]
+
+    image_feat = F.normalize(model.vision_proj(tgt_image_embeds[:, 0, :]), dim=-1)
+    multimodal_feat = F.normalize(model.text_proj(multimodal_embeds[:, 0, :]), dim=-1)
+
+    output = multimodal_feat @ image_feat.t()
+    return output.detach().cpu().numpy().squeeze().tolist()
 
 
-def get_metric(relative_val_dataset, clip_model, index_features, index_names, combining_function, blip_backbone, device):
-    predicted_features, target_names, reference_names, captions = get_preds(relative_val_dataset, clip_model, index_features, index_names, combining_function)
-    print(f"Predicted features shape : {predicted_features.shape}") # val_entry x feature_shape
-    print(f"Target names shape : {len(target_names)}") # val_entry x feature_shape
+def get_correlation_retrieval(index_features, index_names, predicted_features, target_names, reference_names, captions, blip_processor, blip_model, device):
     len_data = len(target_names)
-
-    # Free up memory
-    del clip_model, combining_function
-    _ = gc.collect()
-
-    print(f"Computing FashionIQ {relative_val_dataset.dress_types} validation metrics")
-
-    print("Getting BLIP Model")
-    blip_processor = AutoProcessor.from_pretrained(blip_backbone)
-    blip_model = BlipModel.from_pretrained("./blip").to(device)
-    print("Finshed Loading BLIP Model")
 
     # Normalize the index features
     index_features = F.normalize(index_features, dim=-1).float()
-
-    print(f"Predicted features shape : {predicted_features.shape}") # val_entry x feature_shape
-    print(f"Index features shape : {index_features.shape}") # all_entry x feature_shape
 
     # Compute the distances and sort the results
     distances = 1 - predicted_features @ index_features.T # val_entry x all_entry
     sorted_indices = torch.argsort(distances, dim=-1).cpu()
     sorted_index_names = np.array(index_names)[sorted_indices]
 
-    scoreat10 = 0
-    scoreat50 = 0
-    scoreat10_modified = 0
-    scoreat50_modified = 0
-    print_images = False
-    done = False
+    spearman_corrs, spearman_pvalues = [], []
+    pearson_corrs, pearson_pvalues = [], []
+
     for i in tqdm(range(sorted_index_names.shape[0])):
-        if target_names[i] in sorted_index_names[i][:10] and not done:
-            print_images = True
-            done = True
 
-        scoreat10 += get_retrieved_image_score(blip_processor, blip_model, device, captions[i], reference_names[i], sorted_index_names[i][:10], print_images=print_images)
-        scoreat50 += get_retrieved_image_score(blip_processor, blip_model, device, captions[i], reference_names[i], sorted_index_names[i][:50])
+        scores =  get_blip_scores(blip_model, blip_processor, captions[i], get_images([reference_names[i]]), get_images(sorted_index_names[i][:100]), device)
+        spearman_corr, spearman_pvalue = spearmanr(scores, range(100))
+        pearson_corr, pearson_pvalue = pearsonr(scores, range(100))
+        spearman_corrs.append(spearman_corr)
+        spearman_pvalues.append(spearman_pvalue)
+        pearson_corrs.append(pearson_corr)
+        pearson_pvalues.append(pearson_pvalue)
 
-        # Modify the list to replace the target image with the 10th and 50th retrieved images -> recall = 0
-        modified_list_10 = [x if x != target_names[i] else sorted_index_names[i][10] for x in sorted_index_names[i][:10]]
-        modified_list_50 = [x if x != target_names[i] else sorted_index_names[i][50] for x in sorted_index_names[i][:50]]
+    spearman_corr = np.mean(spearman_corrs)
+    spearman_pvalue = np.mean(spearman_pvalues)
+    pearson_corr = np.mean(pearson_corrs)
+    pearson_pvalue = np.mean(pearson_pvalues)
 
-        scoreat10_modified += get_retrieved_image_score(blip_processor, blip_model, device, captions[i], reference_names[i], modified_list_10, print_images=print_images)
-        scoreat50_modified += get_retrieved_image_score(blip_processor, blip_model, device, captions[i], reference_names[i], modified_list_50)
-        print_images = False
-
-    # Compute the ground-truth labels wrt the predictions
-    labels = torch.tensor(sorted_index_names == np.repeat(np.array(target_names), len(index_names)).reshape(len(target_names), -1))
-    assert torch.equal(torch.sum(labels, dim=-1).int(), torch.ones(len(target_names)).int())
-
-    # Compute the metrics
-    recall_at10 = (torch.sum(labels[:, :10]) / len(labels)).item() * 100
-    recall_at50 = (torch.sum(labels[:, :50]) / len(labels)).item() * 100
-    blip_scores_at10 = scoreat10 / len(labels)
-    blip_scores_at50 = scoreat50 / len(labels)
-    blip_scores_at10_modified = scoreat10_modified / len(labels)
-    blip_scores_at50_modified = scoreat50_modified / len(labels)
-
-    return recall_at10, recall_at50, blip_scores_at10, blip_scores_at50, blip_scores_at10_modified, blip_scores_at50_modified
+    return spearman_corr, spearman_pvalue, pearson_corr, pearson_pvalue
 
 @torch.no_grad()
 def get_preds(relative_val_dataset, clip_model, index_features, index_names, combining_function):
@@ -182,20 +177,42 @@ def get_preds(relative_val_dataset, clip_model, index_features, index_names, com
     return predicted_features, target_names, all_reference_names, captions_test
 
 
+def fashioniq_retrieval(dress_type, clip_model, combining_function, preprocess):
+    classic_val_dataset = FashionIQDataset('val', [dress_type], 'classic', preprocess)
+    relative_val_dataset = FashionIQDataset('val', [dress_type], 'relative', preprocess)
+    index_features, index_names = extract_index_features(classic_val_dataset, clip_model)
+
+    predicted_features, target_names, reference_names, captions = get_preds(relative_val_dataset, clip_model, index_features, index_names, combining_function)
+    return index_features, index_names, predicted_features, target_names, reference_names, captions
+
+def parse_arguments():
+    parser = argparse.ArgumentParser(description='FashionIQ Retrieval Script')
+    parser.add_argument('--dress_type', type=str, required=True, help='Type of dress for retrieval')
+    args = parser.parse_args()
+    return args
+
 if __name__ == "__main__":
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    args = parse_arguments()
+    dress_type = args.dress_type
 
     model_name = 'RN50'
     clip_path = "./CLIP4Cir/pretrained/fiq_clip_RN50_fullft.pt"
     combiner_path = "./CLIP4Cir/pretrained/fiq_comb_RN50_fullft.pt"
-    blip_backbone = "Salesforce/blip-itm-base-coco"
+    blip_backbone = "Salesforce/blip-itm-large-coco"
     clip_model, preprocess, combining_function = get_clip4cir_model(clip_path, model_name, combiner_path, device)
 
-    ## Test on FashionIQ dataset's
-    recall_at10, recall_at50, blip_scores_at10, blip_scores_at50, blip_scores_at10_modified, blip_scores_at50_modified = fashioniq_retrieval('shirt', clip_model, combining_function, preprocess, blip_backbone, device)
-    print(f"Recall @ 10 : {recall_at10}")
-    print(f"Recall @ 50 : {recall_at50}")
-    print(f"BLIP Scores @ 10 : {blip_scores_at10}")
-    print(f"BLIP Scores @ 50 : {blip_scores_at50}")
-    print(f"BLIP Scores Modified @ 10 : {blip_scores_at10_modified}")
-    print(f"BLIP Scores Modified @ 50 : {blip_scores_at50_modified}")
+    # Test on FashionIQ dataset's
+    index_features, index_names, predicted_features, target_names, reference_names, captions = fashioniq_retrieval(
+        dress_type, clip_model, combining_function, preprocess
+    )
+
+    ## Free up Memory
+    del clip_model, combining_function
+    _ = gc.collect()
+
+    blip_processor, blip_model = get_blip_model(blip_backbone, device)
+    spearman_corr, spearman_pvalue, pearson_corr, pearson_pvalue = get_correlation_retrieval(
+        index_features, index_names, predicted_features, target_names, reference_names, captions, blip_processor, blip_model, device
+    )
+    print(f"Spearman Correlation: {spearman_corr}, P-Value: {spearman_pvalue}")
+    print(f"Pearson Correlation: {pearson_corr}, P-Value: {pearson_pvalue}")

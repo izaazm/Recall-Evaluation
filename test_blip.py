@@ -25,12 +25,12 @@ def get_images(image_names):
         res.append(Image.open(image_path))
     return res
 
-def get_embeds(model, processor, src_text, src_image, tgt_images):
+def get_blip_scores(model, processor, src_text, src_image, tgt_images, device):
     # processing
-    src_text_inputs = processor(text=src_text, return_tensors="pt")
+    src_text_inputs = processor(text=src_text, return_tensors="pt").to(device)
     if src_image is not None:
-        src_image_inputs = processor(images=src_image, return_tensors="pt")
-    tgt_image_inputs = processor(images=tgt_images, return_tensors="pt")
+        src_image_inputs = processor(images=src_image, return_tensors="pt").to(device)
+    tgt_image_inputs = processor(images=tgt_images, return_tensors="pt").to(device)
 
     # image embedding
     tgt_image_outputs = model.vision_model(
@@ -79,7 +79,7 @@ if __name__ == "__main__":
         device = torch.device("cpu")
 
     processor = AutoProcessor.from_pretrained("Salesforce/blip-itm-large-coco")
-    model = BlipForImageTextRetrieval.from_pretrained("Salesforce/blip-itm-large-coco")
+    model = BlipForImageTextRetrieval.from_pretrained("Salesforce/blip-itm-large-coco").to(device).eval()
 
     # Batched result
     time_start = time.time()
@@ -88,7 +88,7 @@ if __name__ == "__main__":
     retrieved_images = get_images(retrieved_images_names)
     source_text = "Is green with a four leaf clover and is green and has no text"
 
-    scores = get_embeds(model, processor, source_text, source_image, retrieved_images)
+    scores = get_blip_scores(model, processor, source_text, source_image, retrieved_images, device)
     print("Batched Result: ")
     print(["{0:0.2f}".format(score) for score in scores], time.time() - time_start)
 
@@ -100,7 +100,7 @@ if __name__ == "__main__":
     for retrieved_image in retrieved_images_names:
         tgt_image_path = f"./CLIP4Cir/fashionIQ_dataset/images/{retrieved_image}.png"
         tgt_image = Image.open(tgt_image_path)
-        score = get_embeds(model, processor, source_text, source_image, tgt_image)
+        score = get_blip_scores(model, processor, source_text, source_image, tgt_image, device)
         scores.append(score)
     print("Single Result: ")
     print(["{0:0.2f}".format(score) for score in scores], time.time() - time_start)
