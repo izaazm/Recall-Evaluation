@@ -21,10 +21,9 @@ if __name__ == "__main__":
     image = Image.open(requests.get(url, stream=True).raw)
 
     inputs = processor(
-        text=["a photo of a cat", "a photo of a dog"], images=image, return_tensors="pt", padding=True
+        text=["a photo of a cat", "a photo of a dog", "a photo of a motorcycle"], images=image, return_tensors="pt", padding=True
     ).to(device)
 
     outputs = model(**inputs)
-    logits_per_image = outputs.logits_per_image
-    probs = logits_per_image.softmax(dim=1).detach().cpu().numpy()
-    print(probs)
+    logits = outputs.logits_per_image
+    print(logits)
