@@ -7,7 +7,7 @@ from PIL import Image
 import numpy as np
 import torch
 import torch.nn.functional as F
-from transformers import AutoProcessor, BlipTextModel, BlipVisionModel, AutoConfig, AutoModel, BlipForImageTextRetrieval
+from transformers import AutoProcessor, AutoConfig, CLIPModel, BlipForImageTextRetrieval
 
 def set_seed(seed: int = 2) -> None:
     np.random.seed(seed)
@@ -18,12 +18,14 @@ def set_seed(seed: int = 2) -> None:
     torch.backends.cudnn.benchmark = False
     os.environ["PYTHONHASHSEED"] = str(seed)
 
+
 def get_images(image_names):
     res = []
     for image_name in image_names:
         image_path = f"./CLIP4Cir/fashionIQ_dataset/images/{image_name}.png"
         res.append(Image.open(image_path))
     return res
+
 
 def get_blip_scores(model, processor, src_text, src_image, tgt_images, device):
     # processing
@@ -68,9 +70,29 @@ def get_blip_scores(model, processor, src_text, src_image, tgt_images, device):
     output = multimodal_feat @ image_feat.t()
     return output.detach().cpu().numpy().squeeze().tolist()
 
-if __name__ == "__main__":
-    print("Hello, World!")
 
+def get_src_clip_embedding(model, processor, src_text, src_image, device):
+    inputs = processor(images=src_image, text=src_text, return_tensors="pt").to(device)
+    image_embeds = model.get_image_features(pixel_values=inputs.pixel_values)
+    text_embeds = model.get_text_features(input_ids=inputs.input_ids, attention_mask=inputs.attention_mask)
+    return image_embeds + text_embeds
+
+
+def get_clip_scores(model, processor, src_text, src_image, tgt_images, device):
+    tgt_inputs = processor(images=tgt_images, return_tensors="pt").to(device)
+    tgt_embeds = model.get_image_features(pixel_values=tgt_inputs.pixel_values)
+    src_embeds = get_src_clip_embedding(model, processor, src_text, src_image, device)
+
+    src_embeds = src_embeds / src_embeds.norm(p=2, dim=-1, keepdim=True)
+    tgt_embeds = tgt_embeds / tgt_embeds.norm(p=2, dim=-1, keepdim=True)
+
+    scores = src_embeds @ tgt_embeds.t()
+    return scores.detach().cpu().numpy().squeeze().tolist()
+
+
+if __name__ == "__main__":
+    model_test = "clip" # "clip" or "blip"
+    print(f"Hello, World!, Testing {model_test}")
     if torch.cuda.is_available():
         print("Cuda is available")
         device = torch.device("cuda")
@@ -78,29 +100,23 @@ if __name__ == "__main__":
         print("Cuda is not available")
         device = torch.device("cpu")
 
-    processor = AutoProcessor.from_pretrained("Salesforce/blip-itm-large-coco")
-    model = BlipForImageTextRetrieval.from_pretrained("Salesforce/blip-itm-large-coco").to(device).eval()
-
     # Batched result
     time_start = time.time()
     source_image = Image.open("./CLIP4Cir/fashionIQ_dataset/images/B0083I6W08.png")
     retrieved_images_names = ['B00BPD4N5E', 'B00BIQKAWS', 'B001THROSE', 'B008R567RU', 'B00A3F9MS8', 'B00BHKFFAW', 'B00CLCHVSY', 'B006L28DQY', 'B000LZO27G', 'B0077PMHIO', '9830019934']
     retrieved_images = get_images(retrieved_images_names)
     source_text = "Is green with a four leaf clover and is green and has no text"
+    
+    if model_test == "blip":
+        processor = AutoProcessor.from_pretrained("Salesforce/blip-itm-large-coco")
+        model = BlipForImageTextRetrieval.from_pretrained("Salesforce/blip-itm-large-coco").to(device).eval()
+        scores = get_blip_scores(model, processor, source_text, source_image, retrieved_images, device)
+        print("Batched Result: ")
+        print(["{0:0.2f}".format(score) for score in scores], time.time() - time_start)
 
-    scores = get_blip_scores(model, processor, source_text, source_image, retrieved_images, device)
-    print("Batched Result: ")
-    print(["{0:0.2f}".format(score) for score in scores], time.time() - time_start)
-
-    # Single result
-    time_start = time.time()
-    source_image = Image.open("./CLIP4Cir/fashionIQ_dataset/images/B0083I6W08.png")
-    source_text = "Is green with a four leaf clover and is green and has no text"
-    scores = []
-    for retrieved_image in retrieved_images_names:
-        tgt_image_path = f"./CLIP4Cir/fashionIQ_dataset/images/{retrieved_image}.png"
-        tgt_image = Image.open(tgt_image_path)
-        score = get_blip_scores(model, processor, source_text, source_image, tgt_image, device)
-        scores.append(score)
-    print("Single Result: ")
-    print(["{0:0.2f}".format(score) for score in scores], time.time() - time_start)
+    elif model_test == "clip":
+        processor = AutoProcessor.from_pretrained("openai/clip-vit-large-patch14")
+        model = CLIPModel.from_pretrained("openai/clip-vit-large-patch14").to(device).eval()
+        scores = get_clip_scores(model, processor, source_text, source_image, retrieved_images, device)
+        print("Batched Result: ")
+        print(["{0:0.2f}".format(score) for score in scores], time.time() - time_start)

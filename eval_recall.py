@@ -14,7 +14,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
-from transformers import AutoProcessor, AutoTokenizer, BlipForImageTextRetrieval
+from transformers import AutoProcessor, BlipForImageTextRetrieval, CLIPModel
 
 from CLIP4Cir.src.data_utils import targetpad_transform, FashionIQDataset
 from CLIP4Cir.src.combiner import Combiner
@@ -62,6 +62,15 @@ def get_blip_model(backbone, device):
     print("Finished Loading model")
     return blip_processor, blip_model
 
+
+def get_clip_model(backbone, device):
+    print("Getting CLIP model")
+    clip_processor = AutoProcessor.from_pretrained(backbone)
+    clip_model = CLIPModel.from_pretrained(backbone).to(device).eval()
+    print("Finished Loading model")
+    return clip_processor, clip_model    
+
+
 @torch.no_grad()
 def get_blip_scores(model, processor, src_text, src_image, tgt_images, device):
     # processing
@@ -106,8 +115,27 @@ def get_blip_scores(model, processor, src_text, src_image, tgt_images, device):
     output = multimodal_feat @ image_feat.t()
     return output.detach().cpu().numpy().squeeze().tolist()
 
+@torch.no_grad()
+def get_src_clip_embedding(model, processor, src_text, src_image, device):
+    inputs = processor(images=src_image, text=src_text, return_tensors="pt").to(device)
+    image_embeds = model.get_image_features(pixel_values=inputs.pixel_values)
+    text_embeds = model.get_text_features(input_ids=inputs.input_ids, attention_mask=inputs.attention_mask)
+    return image_embeds + text_embeds
 
-def get_correlation_retrieval(index_features, index_names, predicted_features, target_names, reference_names, captions, blip_processor, blip_model, device):
+@torch.no_grad()
+def get_clip_scores(model, processor, src_text, src_image, tgt_images, device):
+    tgt_inputs = processor(images=tgt_images, return_tensors="pt").to(device)
+    tgt_embeds = model.get_image_features(pixel_values=tgt_inputs.pixel_values)
+    src_embeds = get_src_clip_embedding(model, processor, src_text, src_image, device)
+
+    src_embeds = src_embeds / src_embeds.norm(p=2, dim=-1, keepdim=True)
+    tgt_embeds = tgt_embeds / tgt_embeds.norm(p=2, dim=-1, keepdim=True)
+
+    scores = src_embeds @ tgt_embeds.t()
+    return scores.detach().cpu().numpy().squeeze().tolist()
+
+
+def get_correlation_retrieval(index_features, index_names, predicted_features, target_names, reference_names, captions, processor, model, device, inference_model):
     len_data = len(target_names)
 
     # Normalize the index features
@@ -121,22 +149,36 @@ def get_correlation_retrieval(index_features, index_names, predicted_features, t
     spearman_corrs, spearman_pvalues = [], []
     pearson_corrs, pearson_pvalues = [], []
 
+    # for i in tqdm(range(2)):
     for i in tqdm(range(sorted_index_names.shape[0])):
+        if inference_model == "blip":
+            scores =  get_blip_scores(model, processor, captions[i], get_images([reference_names[i]]), get_images(sorted_index_names[i][:100]), device)
+        elif inference_model == "clip":
+            scores =  get_clip_scores(model, processor, captions[i], get_images([reference_names[i]]), get_images(sorted_index_names[i][:100]), device)
 
-        scores =  get_blip_scores(blip_model, blip_processor, captions[i], get_images([reference_names[i]]), get_images(sorted_index_names[i][:100]), device)
         spearman_corr, spearman_pvalue = spearmanr(scores, range(100))
         pearson_corr, pearson_pvalue = pearsonr(scores, range(100))
-        spearman_corrs.append(spearman_corr)
-        spearman_pvalues.append(spearman_pvalue)
-        pearson_corrs.append(pearson_corr)
-        pearson_pvalues.append(pearson_pvalue)
 
-    spearman_corr = np.mean(spearman_corrs)
-    spearman_pvalue = np.mean(spearman_pvalues)
-    pearson_corr = np.mean(pearson_corrs)
-    pearson_pvalue = np.mean(pearson_pvalues)
+        # spearman_corrs.append(spearman_corr)
+        # spearman_pvalues.append(spearman_pvalue)
+        # pearson_corrs.append(pearson_corr)
+        # pearson_pvalues.append(pearson_pvalue)
 
-    return spearman_corr, spearman_pvalue, pearson_corr, pearson_pvalue
+        # print(f"Image: {reference_names[i]}")
+        # print(f"Caption: {captions[i]}")
+        # print(f"Spearman correlation: {spearman_corr}, pvalue: {spearman_pvalue}")
+        # print(f"Pearson correlation: {pearson_corr}, pvalue: {pearson_pvalue}")
+
+    spearman_corr_mean = np.mean(spearman_corrs)
+    spearman_corr_std = np.std(spearman_corrs)
+    spearman_pvalue_mean = np.mean(spearman_pvalues)
+    spearman_pvalue_std = np.std(spearman_pvalues)
+    pearson_corr_mean = np.mean(pearson_corrs)
+    pearson_corr_std = np.std(pearson_corrs)
+    pearson_pvalue_mean = np.mean(pearson_pvalues)
+    pearson_pvalue_std = np.std(pearson_pvalues)
+
+    return spearman_corr_mean, spearman_corr_std, spearman_pvalue_mean, spearman_pvalue_std, pearson_corr_mean, pearson_corr_std, pearson_pvalue_mean, pearson_pvalue_std
 
 @torch.no_grad()
 def get_preds(relative_val_dataset, clip_model, index_features, index_names, combining_function):
@@ -188,31 +230,47 @@ def fashioniq_retrieval(dress_type, clip_model, combining_function, preprocess):
 def parse_arguments():
     parser = argparse.ArgumentParser(description='FashionIQ Retrieval Script')
     parser.add_argument('--dress_type', type=str, required=True, help='Type of dress for retrieval')
+    parser.add_argument('--eval_model', type=str, required=True, help='Evaluation model to use for evaluation')
     args = parser.parse_args()
     return args
 
 if __name__ == "__main__":
     args = parse_arguments()
     dress_type = args.dress_type
+    eval_model = args.eval_model
+
+    device = torch.device(f"cuda" if torch.cuda.is_available() else "cpu")
+    print("Device: ", device)
 
     model_name = 'RN50'
-    clip_path = "./CLIP4Cir/pretrained/fiq_clip_RN50_fullft.pt"
+    clip4cir_path = "./CLIP4Cir/pretrained/fiq_clip_RN50_fullft.pt"
     combiner_path = "./CLIP4Cir/pretrained/fiq_comb_RN50_fullft.pt"
     blip_backbone = "Salesforce/blip-itm-large-coco"
-    clip_model, preprocess, combining_function = get_clip4cir_model(clip_path, model_name, combiner_path, device)
+    clip_backbone = "openai/clip-vit-large-patch14"
+    clip4cir_model, preprocess, combining_function = get_clip4cir_model(clip4cir_path, model_name, combiner_path, device)
 
     # Test on FashionIQ dataset's
     index_features, index_names, predicted_features, target_names, reference_names, captions = fashioniq_retrieval(
-        dress_type, clip_model, combining_function, preprocess
+        dress_type, clip4cir_model, combining_function, preprocess
     )
 
     ## Free up Memory
-    del clip_model, combining_function
+    del clip4cir_model, combining_function
     _ = gc.collect()
 
-    blip_processor, blip_model = get_blip_model(blip_backbone, device)
-    spearman_corr, spearman_pvalue, pearson_corr, pearson_pvalue = get_correlation_retrieval(
-        index_features, index_names, predicted_features, target_names, reference_names, captions, blip_processor, blip_model, device
-    )
-    print(f"Spearman Correlation: {spearman_corr}, P-Value: {spearman_pvalue}")
-    print(f"Pearson Correlation: {pearson_corr}, P-Value: {pearson_pvalue}")
+    if eval_model == "blip":
+        blip_processor, blip_model = get_blip_model(blip_backbone, device)
+        spearman_corr_mean, spearman_corr_std, spearman_pvalue_mean, spearman_pvalue_std, pearson_corr_mean, pearson_corr_std, pearson_pvalue_mean, pearson_pvalue_std = get_correlation_retrieval(
+            index_features, index_names, predicted_features, target_names, reference_names, captions, blip_processor, blip_model, device, "blip"
+        )
+    elif eval_model == "clip":
+        clip_processor, clip_model = get_clip_model(clip_backbone, device)
+        spearman_corr_mean, spearman_corr_std, spearman_pvalue_mean, spearman_pvalue_std, pearson_corr_mean, pearson_corr_std, pearson_pvalue_mean, pearson_pvalue_std = get_correlation_retrieval(
+            index_features, index_names, predicted_features, target_names, reference_names, captions, clip_processor, clip_model, device, "clip"
+        )
+    
+    print(f"Spearman Correlation: {spearman_corr_mean} +/- {spearman_corr_std}")
+    print(f"Spearman P-Value: {spearman_pvalue_mean} +/- {spearman_pvalue_std}")
+    print(f"Pearson Correlation: {pearson_corr_mean} +/- {pearson_corr_std}")
+    print(f"Pearson P-Value: {pearson_pvalue_mean} +/- {pearson_pvalue_std}")
+    
