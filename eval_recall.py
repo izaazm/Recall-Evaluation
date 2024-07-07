@@ -159,10 +159,10 @@ def get_correlation_retrieval(index_features, index_names, predicted_features, t
         spearman_corr, spearman_pvalue = spearmanr(scores, range(100))
         pearson_corr, pearson_pvalue = pearsonr(scores, range(100))
 
-        # spearman_corrs.append(spearman_corr)
-        # spearman_pvalues.append(spearman_pvalue)
-        # pearson_corrs.append(pearson_corr)
-        # pearson_pvalues.append(pearson_pvalue)
+        spearman_corrs.append(spearman_corr)
+        spearman_pvalues.append(spearman_pvalue)
+        pearson_corrs.append(pearson_corr)
+        pearson_pvalues.append(pearson_pvalue)
 
         # print(f"Image: {reference_names[i]}")
         # print(f"Caption: {captions[i]}")
