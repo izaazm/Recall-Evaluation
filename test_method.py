@@ -7,7 +7,7 @@ from PIL import Image
 import numpy as np
 import torch
 import torch.nn.functional as F
-from transformers import AutoProcessor, AutoConfig, CLIPModel, BlipForImageTextRetrieval
+from transformers import AutoProcessor, AutoConfig, CLIPModel, BlipForImageTextRetrieval, ViTModel 
 
 def set_seed(seed: int = 2) -> None:
     np.random.seed(seed)
@@ -89,9 +89,22 @@ def get_clip_scores(model, processor, src_text, src_image, tgt_images, device):
     scores = src_embeds @ tgt_embeds.t()
     return scores.detach().cpu().numpy().squeeze().tolist()
 
+def get_target_scores(model, processor, target_image, retrieved_image, device):
+    target_inputs = processor(images=target_image, return_tensors="pt").to(device)
+    retrieved_image_inputs = processor(images=retrieved_image, return_tensors="pt").to(device)
+
+    target_embeds = model(pixel_values=target_inputs.pixel_values).last_hidden_state[:, 0]
+    retrieved_images_embeds = model(pixel_values=retrieved_image_inputs.pixel_values).last_hidden_state[:, 0]
+
+    target_embeds = target_embeds / target_embeds.norm(p=2, dim=-1, keepdim=True)
+    retrieved_images_embeds = retrieved_images_embeds / retrieved_images_embeds.norm(p=2, dim=-1, keepdim=True)
+
+    scores = target_embeds @ retrieved_images_embeds.t()
+
+    return scores.detach().cpu().numpy().squeeze().tolist()
 
 if __name__ == "__main__":
-    model_test = "clip" # "clip" or "blip"
+    model_test = "vit" # "clip" or "blip" or "vit"
     print(f"Hello, World!, Testing {model_test}")
     if torch.cuda.is_available():
         print("Cuda is available")
@@ -103,7 +116,8 @@ if __name__ == "__main__":
     # Batched result
     time_start = time.time()
     source_image = Image.open("./CLIP4Cir/fashionIQ_dataset/images/B0083I6W08.png")
-    retrieved_images_names = ['B00BPD4N5E', 'B00BIQKAWS', 'B001THROSE', 'B008R567RU', 'B00A3F9MS8', 'B00BHKFFAW', 'B00CLCHVSY', 'B006L28DQY', 'B000LZO27G', 'B0077PMHIO', '9830019934']
+    target_image = Image.open("./CLIP4Cir/fashionIQ_dataset/images/B00BPD4N5E.png")
+    retrieved_images_names = ['B00BPD4N5E', 'B00BIQKAWS', 'B001THROSE', 'B008R567RU', 'B00A3F9MS8', 'B00BHKFFAW', 'B00CLCHVSY', 'B006L28DQY', 'B000LZO27G', 'B0077PMHIO', '9822504462']
     retrieved_images = get_images(retrieved_images_names)
     source_text = "Is green with a four leaf clover and is green and has no text"
     
@@ -118,5 +132,12 @@ if __name__ == "__main__":
         processor = AutoProcessor.from_pretrained("openai/clip-vit-large-patch14")
         model = CLIPModel.from_pretrained("openai/clip-vit-large-patch14").to(device).eval()
         scores = get_clip_scores(model, processor, source_text, source_image, retrieved_images, device)
+        print("Batched Result: ")
+        print(["{0:0.2f}".format(score) for score in scores], time.time() - time_start)
+
+    elif model_test == "vit":
+        processor = AutoProcessor.from_pretrained("google/vit-base-patch16-224")
+        model = ViTModel.from_pretrained("google/vit-base-patch16-224").to(device).eval()
+        scores = get_target_scores(model, processor, target_image, retrieved_images, device)
         print("Batched Result: ")
         print(["{0:0.2f}".format(score) for score in scores], time.time() - time_start)

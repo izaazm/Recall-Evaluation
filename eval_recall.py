@@ -14,7 +14,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
-from transformers import AutoProcessor, BlipForImageTextRetrieval, CLIPModel
+from transformers import AutoProcessor, BlipForImageTextRetrieval, CLIPModel, ViTModel
 
 from CLIP4Cir.src.data_utils import targetpad_transform, FashionIQDataset
 from CLIP4Cir.src.combiner import Combiner
@@ -32,7 +32,7 @@ def get_images(image_names):
     res = []
     for image_name in image_names:
         image_path = f"CLIP4Cir/fashionIQ_dataset/images/{image_name}.png"
-        res.append(Image.open(image_path))
+        res.append(Image.open(image_path).convert('RGB'))
     return res
 
 def get_clip4cir_model(clip_path, model_name, combiner_path, device):
@@ -68,7 +68,14 @@ def get_clip_model(backbone, device):
     clip_processor = AutoProcessor.from_pretrained(backbone)
     clip_model = CLIPModel.from_pretrained(backbone).to(device).eval()
     print("Finished Loading model")
-    return clip_processor, clip_model    
+    return clip_processor, clip_model   
+
+def get_vit_model(backbone, device):
+    print("Getting CLIP model")
+    vit_processor = AutoProcessor.from_pretrained("google/vit-base-patch16-224")
+    vit_model = ViTModel.from_pretrained("google/vit-base-patch16-224").to(device).eval()
+    print("Finished Loading model")
+    return vit_processor, vit_model   
 
 
 @torch.no_grad()
@@ -134,6 +141,21 @@ def get_clip_scores(model, processor, src_text, src_image, tgt_images, device):
     scores = src_embeds @ tgt_embeds.t()
     return scores.detach().cpu().numpy().squeeze().tolist()
 
+@torch.no_grad()
+def get_vit_scores(model, processor, target_image, retrieved_images, device):
+    target_inputs = processor(images=target_image, return_tensors="pt").to(device)
+    retrieved_image_inputs = processor(images=retrieved_images, return_tensors="pt").to(device)
+
+    target_embeds = model(pixel_values=target_inputs.pixel_values).last_hidden_state[:, 0]
+    retrieved_images_embeds = model(pixel_values=retrieved_image_inputs.pixel_values).last_hidden_state[:, 0]
+
+    target_embeds = target_embeds / target_embeds.norm(p=2, dim=-1, keepdim=True)
+    retrieved_images_embeds = retrieved_images_embeds / retrieved_images_embeds.norm(p=2, dim=-1, keepdim=True)
+
+    scores = target_embeds @ retrieved_images_embeds.t()
+
+    return scores.detach().cpu().numpy().squeeze().tolist()
+
 
 def get_correlation_retrieval(index_features, index_names, predicted_features, target_names, reference_names, captions, processor, model, device, inference_model):
     len_data = len(target_names)
@@ -155,9 +177,11 @@ def get_correlation_retrieval(index_features, index_names, predicted_features, t
             scores =  get_blip_scores(model, processor, captions[i], get_images([reference_names[i]]), get_images(sorted_index_names[i][:100]), device)
         elif inference_model == "clip":
             scores =  get_clip_scores(model, processor, captions[i], get_images([reference_names[i]]), get_images(sorted_index_names[i][:100]), device)
+        elif inference_model == "vit":
+            scores =  get_vit_scores(model, processor, get_images([target_names[i]]), get_images(sorted_index_names[i][:250]), device)
 
-        spearman_corr, spearman_pvalue = spearmanr(scores, range(100))
-        pearson_corr, pearson_pvalue = pearsonr(scores, range(100))
+        spearman_corr, spearman_pvalue = spearmanr(scores, range(250))
+        pearson_corr, pearson_pvalue = pearsonr(scores, range(250))
 
         spearman_corrs.append(spearman_corr)
         spearman_pvalues.append(spearman_pvalue)
@@ -268,6 +292,11 @@ if __name__ == "__main__":
         spearman_corr_mean, spearman_corr_std, spearman_pvalue_mean, spearman_pvalue_std, pearson_corr_mean, pearson_corr_std, pearson_pvalue_mean, pearson_pvalue_std = get_correlation_retrieval(
             index_features, index_names, predicted_features, target_names, reference_names, captions, clip_processor, clip_model, device, "clip"
         )
+    elif eval_model == "vit":
+        vit_processor, vit_model = get_vit_model(clip_backbone, device)
+        spearman_corr_mean, spearman_corr_std, spearman_pvalue_mean, spearman_pvalue_std, pearson_corr_mean, pearson_corr_std, pearson_pvalue_mean, pearson_pvalue_std = get_correlation_retrieval(
+            index_features, index_names, predicted_features, target_names, reference_names, captions, vit_processor, vit_model, device, "vit"
+        )        
     
     print(f"Spearman Correlation: {spearman_corr_mean} +/- {spearman_corr_std}")
     print(f"Spearman P-Value: {spearman_pvalue_mean} +/- {spearman_pvalue_std}")
