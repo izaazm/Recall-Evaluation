@@ -4,9 +4,12 @@ import random
 import requests
 from PIL import Image
 
+import lpips
 import numpy as np
 import torch
+import torchvision
 import torch.nn.functional as F
+import torchvision.transforms as transforms
 from transformers import AutoProcessor, AutoConfig, CLIPModel, BlipForImageTextRetrieval, ViTModel 
 
 def set_seed(seed: int = 2) -> None:
@@ -22,8 +25,8 @@ def set_seed(seed: int = 2) -> None:
 def get_images(image_names):
     res = []
     for image_name in image_names:
-        image_path = f"./CLIP4Cir/fashionIQ_dataset/images/{image_name}.png"
-        res.append(Image.open(image_path))
+        image_path = f"../fashionIQ_dataset/images/{image_name}.png"
+        res.append(Image.open(image_path).convert("RGB"))
     return res
 
 
@@ -103,8 +106,16 @@ def get_target_scores(model, processor, target_image, retrieved_image, device):
 
     return scores.detach().cpu().numpy().squeeze().tolist()
 
+def get_lpips_scores(model, transform, target_image, retrieved_image, device):
+    loss = []
+    for retrieved_img in retrieved_image:
+        img1 = transform(target_image).unsqueeze(0).to(device)
+        img2 = transform(retrieved_img).unsqueeze(0).to(device)
+        loss.append(1 - model(img1, img2).item())
+    return loss
+
 if __name__ == "__main__":
-    model_test = "vit" # "clip" or "blip" or "vit"
+    model_test = "lpips" # "clip" or "blip" or "vit" ir "lpips"
     print(f"Hello, World!, Testing {model_test}")
     if torch.cuda.is_available():
         print("Cuda is available")
@@ -115,8 +126,8 @@ if __name__ == "__main__":
 
     # Batched result
     time_start = time.time()
-    source_image = Image.open("./CLIP4Cir/fashionIQ_dataset/images/B0083I6W08.png")
-    target_image = Image.open("./CLIP4Cir/fashionIQ_dataset/images/B00BPD4N5E.png")
+    source_image = Image.open("../fashionIQ_dataset/images/B0083I6W08.png").convert("RGB")
+    target_image = Image.open("../fashionIQ_dataset/images/B00BPD4N5E.png").convert("RGB")
     retrieved_images_names = ['B00BPD4N5E', 'B00BIQKAWS', 'B001THROSE', 'B008R567RU', 'B00A3F9MS8', 'B00BHKFFAW', 'B00CLCHVSY', 'B006L28DQY', 'B000LZO27G', 'B0077PMHIO', '9822504462']
     retrieved_images = get_images(retrieved_images_names)
     source_text = "Is green with a four leaf clover and is green and has no text"
@@ -139,5 +150,15 @@ if __name__ == "__main__":
         processor = AutoProcessor.from_pretrained("google/vit-base-patch16-224")
         model = ViTModel.from_pretrained("google/vit-base-patch16-224").to(device).eval()
         scores = get_target_scores(model, processor, target_image, retrieved_images, device)
+        print("Batched Result: ")
+        print(["{0:0.2f}".format(score) for score in scores], time.time() - time_start)
+
+    elif model_test == "lpips":
+        loss_fn_alex = lpips.LPIPS(net='alex').to(device)
+        transform = transforms.Compose(
+            [transforms.Resize((64, 64)),
+            transforms.ToTensor(),
+            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
+        scores = get_lpips_scores(loss_fn_alex, transform, target_image, retrieved_images, device)
         print("Batched Result: ")
         print(["{0:0.2f}".format(score) for score in scores], time.time() - time_start)

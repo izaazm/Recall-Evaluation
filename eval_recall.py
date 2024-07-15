@@ -8,11 +8,13 @@ import numpy as np
 from PIL import Image
 from tqdm import tqdm
 from scipy.stats import spearmanr, pearsonr
+import lpips
 
 import clip
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torchvision.transforms as transforms
 from torch.utils.data import DataLoader
 from transformers import AutoProcessor, BlipForImageTextRetrieval, CLIPModel, ViTModel
 
@@ -31,7 +33,7 @@ CONFIG = {
 def get_images(image_names):
     res = []
     for image_name in image_names:
-        image_path = f"CLIP4Cir/fashionIQ_dataset/images/{image_name}.png"
+        image_path = f"../fashionIQ_dataset/images/{image_name}.png"
         res.append(Image.open(image_path).convert('RGB'))
     return res
 
@@ -72,8 +74,8 @@ def get_clip_model(backbone, device):
 
 def get_vit_model(backbone, device):
     print("Getting CLIP model")
-    vit_processor = AutoProcessor.from_pretrained("google/vit-base-patch16-224")
-    vit_model = ViTModel.from_pretrained("google/vit-base-patch16-224").to(device).eval()
+    vit_processor = AutoProcessor.from_pretrained("google/vit-large-patch16-224")
+    vit_model = ViTModel.from_pretrained("google/vit-large-patch16-224").to(device).eval()
     print("Finished Loading model")
     return vit_processor, vit_model   
 
@@ -157,6 +159,16 @@ def get_vit_scores(model, processor, target_image, retrieved_images, device):
     return scores.detach().cpu().numpy().squeeze().tolist()
 
 
+@torch.no_grad()
+def get_lpips_scores(model, transform, target_image, retrieved_image, device):
+    loss = []
+    for retrieved_img in retrieved_image:
+        img1 = transform(target_image).unsqueeze(0).to(device)
+        img2 = transform(retrieved_img).unsqueeze(0).to(device)
+        loss.append(1 - model(img1, img2).item())
+    return loss
+
+
 def get_correlation_retrieval(index_features, index_names, predicted_features, target_names, reference_names, captions, processor, model, device, inference_model):
     len_data = len(target_names)
 
@@ -171,7 +183,6 @@ def get_correlation_retrieval(index_features, index_names, predicted_features, t
     spearman_corrs, spearman_pvalues = [], []
     pearson_corrs, pearson_pvalues = [], []
 
-    # for i in tqdm(range(2)):
     for i in tqdm(range(sorted_index_names.shape[0])):
         if inference_model == "blip":
             scores =  get_blip_scores(model, processor, captions[i], get_images([reference_names[i]]), get_images(sorted_index_names[i][:100]), device)
@@ -179,14 +190,16 @@ def get_correlation_retrieval(index_features, index_names, predicted_features, t
             scores =  get_clip_scores(model, processor, captions[i], get_images([reference_names[i]]), get_images(sorted_index_names[i][:100]), device)
         elif inference_model == "vit":
             scores =  get_vit_scores(model, processor, get_images([target_names[i]]), get_images(sorted_index_names[i][:250]), device)
+        elif inference_model == "lpips":
+            scores = get_lpips_scores(model, processor, get_images([target_names[i]])[0], get_images(sorted_index_names[i][:250]), device)
 
-        spearman_corr, spearman_pvalue = spearmanr(scores, range(250))
-        pearson_corr, pearson_pvalue = pearsonr(scores, range(250))
+            spearman_corr, spearman_pvalue = spearmanr(scores, range(250))
+            pearson_corr, pearson_pvalue = pearsonr(scores, range(250))
 
-        spearman_corrs.append(spearman_corr)
-        spearman_pvalues.append(spearman_pvalue)
-        pearson_corrs.append(pearson_corr)
-        pearson_pvalues.append(pearson_pvalue)
+            spearman_corrs.append(spearman_corr)
+            spearman_pvalues.append(spearman_pvalue)
+            pearson_corrs.append(pearson_corr)
+            pearson_pvalues.append(pearson_pvalue)
 
         # print(f"Image: {reference_names[i]}")
         # print(f"Caption: {captions[i]}")
@@ -283,20 +296,22 @@ if __name__ == "__main__":
     _ = gc.collect()
 
     if eval_model == "blip":
-        blip_processor, blip_model = get_blip_model(blip_backbone, device)
-        spearman_corr_mean, spearman_corr_std, spearman_pvalue_mean, spearman_pvalue_std, pearson_corr_mean, pearson_corr_std, pearson_pvalue_mean, pearson_pvalue_std = get_correlation_retrieval(
-            index_features, index_names, predicted_features, target_names, reference_names, captions, blip_processor, blip_model, device, "blip"
-        )
+        processor, model = get_blip_model(blip_backbone, device)
     elif eval_model == "clip":
-        clip_processor, clip_model = get_clip_model(clip_backbone, device)
-        spearman_corr_mean, spearman_corr_std, spearman_pvalue_mean, spearman_pvalue_std, pearson_corr_mean, pearson_corr_std, pearson_pvalue_mean, pearson_pvalue_std = get_correlation_retrieval(
-            index_features, index_names, predicted_features, target_names, reference_names, captions, clip_processor, clip_model, device, "clip"
-        )
+        processor, model = get_clip_model(clip_backbone, device)
     elif eval_model == "vit":
-        vit_processor, vit_model = get_vit_model(clip_backbone, device)
-        spearman_corr_mean, spearman_corr_std, spearman_pvalue_mean, spearman_pvalue_std, pearson_corr_mean, pearson_corr_std, pearson_pvalue_mean, pearson_pvalue_std = get_correlation_retrieval(
-            index_features, index_names, predicted_features, target_names, reference_names, captions, vit_processor, vit_model, device, "vit"
-        )        
+        processor, model = get_vit_model(clip_backbone, device)    
+    elif eval_model == "lpips":
+        model = lpips.LPIPS(net='alex').to(device)
+        processor = transforms.Compose(
+            [transforms.Resize((64, 64)),
+            transforms.ToTensor(),
+            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
+
+
+    spearman_corr_mean, spearman_corr_std, spearman_pvalue_mean, spearman_pvalue_std, pearson_corr_mean, pearson_corr_std, pearson_pvalue_mean, pearson_pvalue_std = get_correlation_retrieval(
+        index_features, index_names, predicted_features, target_names, reference_names, captions, processor, model, device, eval_model
+    )    
     
     print(f"Spearman Correlation: {spearman_corr_mean} +/- {spearman_corr_std}")
     print(f"Spearman P-Value: {spearman_pvalue_mean} +/- {spearman_pvalue_std}")
